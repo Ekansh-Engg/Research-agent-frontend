@@ -1,69 +1,220 @@
-import Image from "next/image";
+"use client";
+
+import { useCallback, useEffect, useState } from "react";
+import { Show, SignInButton, useAuth, UserButton } from "@clerk/nextjs";
+import { AgentRunTrace } from "@/components/AgentRunTrace";
+
+type AgentRun = {
+  id: string;
+  query: string;
+  status: string;
+  cost_usd: number;
+  iteration_count: number;
+  created_at: string;
+};
+
+function TriggerForm({ onRunStarted }: { onRunStarted: (jobId: string) => void }) {
+  const { getToken } = useAuth();
+  const [query, setQuery] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function handleSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    if (!query.trim()) return;
+
+    setSubmitting(true);
+    setError(null);
+    try {
+      const token = await getToken();
+      const res = await fetch(
+        `${process.env.NEXT_PUBLIC_API_URL}/agent/run?query=${encodeURIComponent(query)}`,
+        { method: "POST", headers: { Authorization: `Bearer ${token}` } }
+      );
+      if (!res.ok) throw new Error(`Request failed: ${res.status}`);
+      const data = await res.json();
+      onRunStarted(data.job_id);
+      setQuery("");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Something went wrong. Try again.");
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  return (
+    <form onSubmit={handleSubmit} className="mb-8">
+      <div className="flex flex-col sm:flex-row gap-3 rounded-2xl border-2 border-line bg-card p-2 focus-within:border-brand transition-colors">
+        <input
+          type="text"
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          placeholder="Ask a research question…"
+          className="flex-1 bg-transparent px-3 py-3 text-ink placeholder:text-ink-soft/60 outline-none"
+          disabled={submitting}
+        />
+        <button
+          type="submit"
+          disabled={submitting || !query.trim()}
+          className="font-display font-medium px-6 py-3 rounded-xl bg-brand text-white hover:bg-brand-dark transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+        >
+          {submitting ? "Starting…" : "Run"}
+        </button>
+      </div>
+      {error && <p className="text-coral text-sm mt-2">{error}</p>}
+    </form>
+  );
+}
+
+function formatRelativeTime(isoString: string): string {
+  const date = new Date(isoString);
+  const seconds = Math.floor((Date.now() - date.getTime()) / 1000);
+
+  if (seconds < 60) return "just now";
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h ago`;
+  const days = Math.floor(hours / 24);
+  if (days < 7) return `${days}d ago`;
+  return date.toLocaleDateString();
+}
+
+function statusStyles(status: string) {
+  if (status === "FAILED") {
+    return { border: "border-l-coral", text: "text-coral" };
+  }
+  if (status === "COMPLETED") {
+    return { border: "border-l-teal", text: "text-teal" };
+  }
+  // RUNNING / PENDING / anything else in-flight
+  return { border: "border-l-amber", text: "text-amber" };
+}
+
+function RunHistory({ refreshKey }: { refreshKey: number }) {
+  const { getToken } = useAuth();
+  const [runs, setRuns] = useState<AgentRun[]>([]);
+  const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    async function fetchRuns() {
+      setLoading(true);
+      const token = await getToken();
+      const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/agent/runs`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (!res.ok) {
+        setError(`Couldn't load run history (${res.status})`);
+        setLoading(false);
+        return;
+      }
+      setRuns(await res.json());
+      setLoading(false);
+    }
+    fetchRuns().catch((err) => {
+      setError(err.message);
+      setLoading(false);
+    });
+  }, [getToken, refreshKey]);
+
+  if (loading) {
+    return <p className="text-sm text-ink-soft">Loading history…</p>;
+  }
+
+  if (error) {
+    return <p className="text-sm text-coral">{error}</p>;
+  }
+
+  if (runs.length === 0) {
+    return (
+      <p className="text-sm text-ink-soft">
+        No runs yet — ask something above to see the agent think.
+      </p>
+    );
+  }
+
+  return (
+    <ul className="space-y-3">
+      {runs.map((run) => {
+        const styles = statusStyles(run.status);
+        return (
+          <li
+            key={run.id}
+            className={`rounded-xl border-l-4 bg-card p-4 ${styles.border} border-y border-r border-line`}
+          >
+            <p className="text-sm text-ink">{run.query}</p>
+            <p className="font-mono text-xs text-ink-soft mt-3 flex flex-wrap gap-x-3">
+              <span className={styles.text}>{run.status}</span>
+              <span>{run.iteration_count} steps</span>
+              <span>${run.cost_usd.toFixed(4)}</span>
+              <span className="text-ink-soft/70">{formatRelativeTime(run.created_at)}</span>
+            </p>
+          </li>
+        );
+      })}
+    </ul>
+  );
+}
 
 export default function Home() {
+  const [activeJobId, setActiveJobId] = useState<string | null>(null);
+  const [refreshKey, setRefreshKey] = useState(0);
+
+  const handleRunStarted = useCallback((jobId: string) => {
+    setActiveJobId(jobId);
+  }, []);
+
+  const handleRunFinished = useCallback(() => {
+    setRefreshKey((k) => k + 1);
+  }, []);
+
+
   return (
-    <div className="flex flex-col flex-1 items-center justify-center bg-zinc-50 font-sans dark:bg-black">
-      <main className="flex flex-1 w-full max-w-3xl flex-col items-center justify-between py-32 px-16 bg-white dark:bg-black sm:items-start">
-        <Image
-          className="dark:invert h-5 w-[100px]"
-          src="/next.svg"
-          alt="Next.js logo"
-          width={100}
-          height={20}
-          priority
-        />
-        <div className="flex flex-col items-center gap-6 text-center sm:items-start sm:text-left">
-          <h1 className="max-w-xs text-3xl font-semibold leading-10 tracking-tight text-black dark:text-zinc-50">
-            To get started, edit the{" "}
-            <code className="rounded bg-black/[.06] px-1.5 py-0.5 font-mono text-[0.9em] dark:bg-white/[.08]">
-              page.tsx
-            </code>{" "}
-            file.
+    <main className="min-h-screen">
+      <div className="max-w-2xl mx-auto px-6 py-10">
+        <div className="flex justify-between items-center mb-10">
+          <h1 className="font-display text-xl font-bold text-ink tracking-tight">
+            Research Agent
           </h1>
-          <p className="max-w-md text-lg leading-8 text-zinc-600 dark:text-zinc-400">
-            Looking for a starting point or more instructions? Head over to{" "}
-            <a
-              href="https://vercel.com/templates?framework=next.js&utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Templates
-            </a>{" "}
-            or the{" "}
-            <a
-              href="https://nextjs.org/learn?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Learning
-            </a>{" "}
-            center.
-          </p>
+          <Show when="signed-in">
+            <UserButton />
+          </Show>
         </div>
-        <div className="flex flex-col gap-4 text-base font-medium sm:flex-row">
-          <a
-            className="flex h-12 w-full items-center justify-center gap-2 rounded-full bg-foreground px-5 text-background transition-colors hover:bg-[#383838] dark:hover:bg-[#ccc] md:w-[158px]"
-            href="https://vercel.com/new?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            <Image
-              className="dark:invert h-[14px] w-4"
-              src="/vercel.svg"
-              alt="Vercel logomark"
-              width={16}
-              height={14}
+
+        <Show when="signed-out">
+          <div className="rounded-2xl border-2 border-dashed border-line p-10 text-center">
+            <p className="font-display text-lg font-medium text-ink mb-2">
+              Sign in to start researching
+            </p>
+            <p className="text-sm text-ink-soft mb-5">
+              Your agent runs, complete with live traces and history, are tied to your account.
+            </p>
+            <SignInButton mode="modal">
+              <button className="font-display font-medium px-6 py-2.5 rounded-xl bg-brand text-white hover:bg-brand-dark transition-colors">
+                Sign in
+              </button>
+            </SignInButton>
+          </div>
+        </Show>
+
+        <Show when="signed-in">
+          <TriggerForm onRunStarted={handleRunStarted} />
+
+          {activeJobId && (
+            <AgentRunTrace
+              key={activeJobId}
+              jobId={activeJobId}
+              onFinished={handleRunFinished}
             />
-            Deploy Now
-          </a>
-          <a
-            className="flex h-12 w-full items-center justify-center rounded-full border border-solid border-black/[.08] px-5 transition-colors hover:border-transparent hover:bg-black/[.04] dark:border-white/[.145] dark:hover:bg-[#1a1a1a] md:w-[158px]"
-            href="https://nextjs.org/docs?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            Documentation
-          </a>
-        </div>
-      </main>
-    </div>
+          )}
+
+          <h2 className="font-display text-sm font-medium text-ink-soft uppercase tracking-wide mb-3">
+            History
+          </h2>
+          <RunHistory refreshKey={refreshKey} />
+        </Show>
+      </div>
+    </main>
   );
 }
